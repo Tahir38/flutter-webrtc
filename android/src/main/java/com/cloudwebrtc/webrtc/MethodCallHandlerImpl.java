@@ -161,6 +161,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     this.context = context;
     this.textures = textureRegistry;
     this.messenger = messenger;
+    KaytenWebRtcCryptoBridge.bind(this);
   }
 
   static private void resultError(String method, String error, Result result) {
@@ -204,6 +205,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       }
     }
     mPeerConnectionObservers.clear();
+    KaytenWebRtcCryptoBridge.reset(this);
   }
   private void initialize(boolean bypassVoiceProcessing, int networkIgnoreMask, boolean forceSWCodec, List<String> forceSWCodecList,
   @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate) {
@@ -1576,6 +1578,10 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     return mPeerConnectionObservers.get(peerConnectionId);
   }
 
+  List<PeerConnectionObserver> peerConnectionObserversSnapshot() {
+    return new ArrayList<>(mPeerConnectionObservers.values());
+  }
+
   @Nullable
   @Override
   public Activity getActivity() {
@@ -2116,6 +2122,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     if (pco == null || pco.getPeerConnection() == null) {
       Log.d(TAG, "peerConnectionClose() peerConnection is null");
     } else {
+      KaytenWebRtcCryptoBridge.markPeerConnectionClosing(id);
       pco.close();
     }
   }
@@ -2139,7 +2146,9 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     if (pco.getPeerConnection() == null) {
       Log.d(TAG, "peerConnectionDispose() peerConnection is null");
     } else {
+      KaytenWebRtcCryptoBridge.markPeerConnectionClosing(pco.getId());
       pco.dispose();
+      KaytenWebRtcCryptoBridge.markPeerConnectionDisposed(pco.getId());
       return true;
     }
     return false;

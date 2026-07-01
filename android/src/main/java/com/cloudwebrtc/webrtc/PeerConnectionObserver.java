@@ -90,6 +90,10 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
     return peerConnection;
   }
 
+  String getId() {
+    return id;
+  }
+
   void setPeerConnection(PeerConnection peerConnection) {
     this.peerConnection = peerConnection;
   }
