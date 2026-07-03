@@ -41,6 +41,11 @@ public final class KaytenWebRtcCryptoBridge {
   private static final Set<StateProvider> providers =
       Collections.newSetFromMap(new IdentityHashMap<>());
 
+  private static volatile KaytenVideoCryptorProvider cryptorProvider;
+
+  public static void setCryptorProvider(KaytenVideoCryptorProvider p) { cryptorProvider = p; }
+  static KaytenVideoCryptorProvider getCryptorProvider() { return cryptorProvider; }
+
   private KaytenWebRtcCryptoBridge() {}
 
   static void bind(StateProvider provider) {
@@ -132,6 +137,33 @@ public final class KaytenWebRtcCryptoBridge {
     synchronized (lock) {
       providers.clear();
       states.clear();
+    }
+  }
+
+  /**
+   * Attach an (unbound) encryptor to a freshly-created sender. Called by the app
+   * provider from inside PeerConnectionObserver.addTrack, ALREADY holding the
+   * app manager.lock — this takes bridge.lock only (single manager->bridge order).
+   */
+  public static boolean attachEncryptorAtCreation(
+      String peerConnectionId, RtpSender sender, FrameEncryptor encryptor) {
+    if (sender == null || encryptor == null) return false;
+    synchronized (lock) {
+      PcState state = stateFor(peerConnectionId);
+      if (state.disposing) return false;
+      sender.setFrameEncryptor(encryptor);
+      return true;
+    }
+  }
+
+  public static boolean attachDecryptorAtCreation(
+      String peerConnectionId, RtpReceiver receiver, FrameDecryptor decryptor) {
+    if (receiver == null || decryptor == null) return false;
+    synchronized (lock) {
+      PcState state = stateFor(peerConnectionId);
+      if (state.disposing) return false;
+      receiver.setFrameDecryptor(decryptor);
+      return true;
     }
   }
 
