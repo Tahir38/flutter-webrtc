@@ -1588,10 +1588,6 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     return mPeerConnectionObservers.get(peerConnectionId);
   }
 
-  List<PeerConnectionObserver> peerConnectionObserversSnapshot() {
-    return new ArrayList<>(mPeerConnectionObservers.values());
-  }
-
   @Nullable
   @Override
   public Activity getActivity() {
