@@ -2145,6 +2145,14 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   public boolean peerConnectionDispose(final PeerConnectionObserver pco) {
     if (pco.getPeerConnection() == null) {
       Log.d(TAG, "peerConnectionDispose() peerConnection is null");
+      // Even though there is no native PeerConnection left to tear down here (already
+      // freed, or a double-dispose racing a prior close()), the Kayten crypto bridge may
+      // still hold a PcState for this id (e.g. markPeerConnectionClosing() ran during an
+      // earlier peerConnectionClose()). Without this, a close-without-a-matching-dispose
+      // (or a dispose that observes a null PC) leaves a permanent disposing=true entry in
+      // the bridge's static state map: a small leak, and a permanent attach* rejection for
+      // this id. markPeerConnectionDisposed() is a no-op if there is nothing to remove.
+      KaytenWebRtcCryptoBridge.markPeerConnectionDisposed(pco.getId());
     } else {
       KaytenWebRtcCryptoBridge.markPeerConnectionClosing(pco.getId());
       pco.dispose();
