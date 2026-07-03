@@ -23,6 +23,17 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
         .listen(eventListener, onError: errorListener);
   }
 
+  /// Kayten (MoHSM-321): the flutter_webrtc-generated id used as the native
+  /// `peerConnectionId` MethodChannel key. Needed to arm the Kayten video
+  /// cryptor provider (registerPc) before addTrack creates the sender.
+  ///
+  /// NOTE: no `@override` — the abstract `RTCPeerConnection` type lives in
+  /// the hosted `webrtc_interface` pub.dev package (not forked into this
+  /// submodule), so this getter cannot be declared on the interface. Callers
+  /// that hold a static `RTCPeerConnection` reference must cast to
+  /// `RTCPeerConnectionNative` to reach it. See task-A3-report.md.
+  String get peerConnectionId => _peerConnectionId;
+
   // private:
   final String _peerConnectionId;
   StreamSubscription<dynamic>? _eventSubscription;
