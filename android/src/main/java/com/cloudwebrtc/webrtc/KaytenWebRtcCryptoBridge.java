@@ -2,8 +2,11 @@ package com.cloudwebrtc.webrtc;
 
 import android.util.Log;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.Set;
 import org.webrtc.FrameDecryptor;
 import org.webrtc.FrameEncryptor;
 import org.webrtc.RtpReceiver;
@@ -23,21 +26,37 @@ public final class KaytenWebRtcCryptoBridge {
   private static final String TAG = "KaytenWebRtcCryptoBridge";
   private static final Object lock = new Object();
   private static final Map<String, PcState> states = new HashMap<>();
-  private static StateProvider stateProvider;
+
+  // MoHSM-347/348: track EVERY bound flutter_webrtc plugin handler, not just the
+  // last one. The FCM background FlutterEngine (KaytenFirebaseService) runs
+  // GeneratedPluginRegistrant, which registers flutter_webrtc and constructs a
+  // second MethodCallHandlerImpl whose constructor calls bind(this). With a single
+  // "last provider wins" reference, that empty-PeerConnectionObserver-map handler
+  // would overwrite the main engine's handler here, so observerFor() resolves no
+  // observer and every video attach fails (Dart logs present_but_unresolved →
+  // MoHSM-171 degrade-to-voice). A call's PeerConnection lives in exactly one
+  // handler; resolving it from whichever bound handler actually holds it is immune
+  // to which engine attached last. Identity-keyed so distinct handler instances
+  // never collide. All access is under `lock`.
+  private static final Set<StateProvider> providers =
+      Collections.newSetFromMap(new IdentityHashMap<>());
 
   private KaytenWebRtcCryptoBridge() {}
 
   static void bind(StateProvider provider) {
     synchronized (lock) {
-      stateProvider = provider;
+      if (provider != null) {
+        providers.add(provider);
+      }
     }
   }
 
   static void reset(StateProvider provider) {
     synchronized (lock) {
-      if (stateProvider == provider) {
+      // Only fully clear the PcState map once the LAST handler unbinds; a live
+      // background/main handler that remains bound must keep resolving its PCs.
+      if (providers.remove(provider) && providers.isEmpty()) {
         states.clear();
-        stateProvider = null;
       }
     }
   }
@@ -58,7 +77,16 @@ public final class KaytenWebRtcCryptoBridge {
 
   public static boolean isBound() {
     synchronized (lock) {
-      return stateProvider != null;
+      return !providers.isEmpty();
+    }
+  }
+
+  // @VisibleForTesting -- this bridge is a process-static singleton, so tests must
+  // fully clear its bound-provider + PcState maps between runs for isolation.
+  static void resetAllForTest() {
+    synchronized (lock) {
+      providers.clear();
+      states.clear();
     }
   }
 
@@ -191,32 +219,53 @@ public final class KaytenWebRtcCryptoBridge {
     state.receivers.clear();
   }
 
+  // Resolve the observer for [peerConnectionId] from whichever bound handler holds
+  // it. A PC lives in exactly one handler, so the first non-null match is correct;
+  // an empty background handler simply returns null and the search continues.
+  // Caller must hold `lock`.
   private static PeerConnectionObserver observerFor(String peerConnectionId) {
-    StateProvider provider = stateProvider;
-    if (provider == null) return null;
-    return provider.getPeerConnectionObserver(peerConnectionId);
-  }
-
-  private static String findPeerConnectionIdForSender(String senderId) {
-    StateProvider provider = stateProvider;
-    if (!(provider instanceof MethodCallHandlerImpl)) return null;
-    for (PeerConnectionObserver observer : ((MethodCallHandlerImpl) provider).peerConnectionObserversSnapshot()) {
-      if (observer.getPeerConnection() != null && observer.getRtpSenderById(senderId) != null) {
-        return observer.getId();
+    for (StateProvider provider : providers) {
+      PeerConnectionObserver observer = provider.getPeerConnectionObserver(peerConnectionId);
+      if (observer != null) {
+        return observer;
       }
     }
     return null;
+  }
+
+  // Unlike observerFor (whose callers already hold `lock`), the by-id fallback
+  // entry points (attachVideoEncryptorBySenderId / ...ByReceiverId) do NOT
+  // synchronize, so these methods acquire `lock` themselves before iterating the
+  // mutable `providers` set — a concurrent bind()/reset() (e.g. the FCM background
+  // engine attaching mid-call) would otherwise fail-fast the IdentityHashMap
+  // iterator. `lock` is reentrant, so the follow-on attachVideoEncryptor re-acquire
+  // is safe.
+  private static String findPeerConnectionIdForSender(String senderId) {
+    synchronized (lock) {
+      for (StateProvider provider : providers) {
+        if (!(provider instanceof MethodCallHandlerImpl)) continue;
+        for (PeerConnectionObserver observer : ((MethodCallHandlerImpl) provider).peerConnectionObserversSnapshot()) {
+          if (observer.getPeerConnection() != null && observer.getRtpSenderById(senderId) != null) {
+            return observer.getId();
+          }
+        }
+      }
+      return null;
+    }
   }
 
   private static String findPeerConnectionIdForReceiver(String receiverId) {
-    StateProvider provider = stateProvider;
-    if (!(provider instanceof MethodCallHandlerImpl)) return null;
-    for (PeerConnectionObserver observer : ((MethodCallHandlerImpl) provider).peerConnectionObserversSnapshot()) {
-      if (observer.getPeerConnection() != null && observer.getRtpReceiverById(receiverId) != null) {
-        return observer.getId();
+    synchronized (lock) {
+      for (StateProvider provider : providers) {
+        if (!(provider instanceof MethodCallHandlerImpl)) continue;
+        for (PeerConnectionObserver observer : ((MethodCallHandlerImpl) provider).peerConnectionObserversSnapshot()) {
+          if (observer.getPeerConnection() != null && observer.getRtpReceiverById(receiverId) != null) {
+            return observer.getId();
+          }
+        }
       }
+      return null;
     }
-    return null;
   }
 
   private static PcState stateFor(String peerConnectionId) {
