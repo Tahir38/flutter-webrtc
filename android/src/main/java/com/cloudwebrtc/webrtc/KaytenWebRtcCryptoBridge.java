@@ -80,23 +80,43 @@ public final class KaytenWebRtcCryptoBridge {
   }
 
   /**
-   * Atomically tear down a PeerConnection: mark it closing, free the native PeerConnection,
-   * remove the plugin's observer from its own map, and drop the PcState — ALL while holding
-   * {@link #lock}.
+   * Tear down a PeerConnection: mark it closing, remove the plugin's observer from its own map,
+   * and drop the PcState under {@link #lock} — THEN free the native PeerConnection OUTSIDE the
+   * lock.
    *
-   * <p>MoHSM-321/322/347/348 UAF fix. {@code attachEncryptorAtCreation}/
-   * {@code attachDecryptorAtCreation} also hold {@link #lock}, so a concurrent connect-time
-   * attach is now strictly serialized against this teardown: it either runs entirely BEFORE
-   * (resolving a live, non-disposing PcState) or entirely AFTER ({@code state.disposing} is
-   * already {@code true}, so attach fails closed). There is nothing to explicitly detach here
-   * under the never-detach model — {@code pco.dispose()} frees the native PeerConnection along
-   * with its RtpSenders/RtpReceivers, which is what actually releases the frame cryptors. The
-   * previous by-id design freed the native PC and cleared the disposing flag OUTSIDE this
-   * critical section and removed the observer from the plugin map only afterward — leaving a
-   * window in which an attach re-created a fresh {@code disposing=false} PcState, resolved the
-   * still-mapped observer, and called {@code getRtpSenderById}/{@code setFrameEncryptor} on the
-   * already-freed native PeerConnection (dangling vtable → SIGSEGV in
-   * {@code nativeSetFrameEncryptor}).
+   * <p>MoHSM-321/322/347/348 UAF fix, revised for the attach-at-creation deadlock (MoHSM-321
+   * follow-up). {@code attachEncryptorAtCreation}/{@code attachDecryptorAtCreation} also hold
+   * {@link #lock}, so a concurrent connect-time attach is still strictly serialized against the
+   * disposing-flag + observer-map-removal step above: it either runs entirely BEFORE (resolving
+   * a live, non-disposing PcState) or entirely AFTER ({@code state.disposing} is already {@code
+   * true}, so attach fails closed). That serialization is all the "atomicity" this method needs
+   * — there is nothing to explicitly detach under the never-detach model, since {@code
+   * pco.dispose()} frees the native PeerConnection along with its RtpSenders/RtpReceivers, which
+   * is what actually releases the frame cryptors.
+   *
+   * <p>{@code pco.dispose()} is deliberately called OUTSIDE {@link #lock}. {@code
+   * org.webrtc.PeerConnection.dispose()} blocks the calling (platform) thread on native teardown,
+   * which itself blocks on the WebRTC signaling thread. Attach-at-creation now runs ON the
+   * signaling thread ({@code PeerConnectionObserver.onAddTrack} → {@code
+   * KaytenVideoCallManager.onVideoReceiverCreated}, which holds the app-level manager lock →
+   * {@code attachDecryptorAtCreation} → this bridge's {@link #lock}). Holding {@link #lock}
+   * across {@code pco.dispose()} would deadlock the two threads: the platform thread would sit in
+   * {@code pco.dispose()} holding {@link #lock} and waiting on the signaling thread, while the
+   * signaling thread sits waiting to acquire {@link #lock} while holding the manager lock — a
+   * classic teardown-while-a-remote-track-arrives ANR. Doing the disposing-flag write and
+   * observer-map removal under the lock FIRST, then releasing the lock before the blocking native
+   * call, preserves the fail-closed guarantee for concurrent attaches without ever holding two
+   * locks across a blocking cross-thread call.
+   *
+   * <p>The earlier by-id design (pre-attach-at-creation) additionally needed the native free
+   * itself inside the critical section, because that design resolved observers by id out of a
+   * shared map at attach time; freeing the PC and clearing the disposing flag outside that
+   * section left a window where a re-created {@code disposing=false} PcState let an attach
+   * resolve the still-mapped observer and call {@code getRtpSenderById}/{@code
+   * setFrameEncryptor} on the already-freed native PeerConnection (dangling vtable → SIGSEGV in
+   * {@code nativeSetFrameEncryptor}). Attach-at-creation never resolves an observer by id (the
+   * MoHSM-347/348 reason for holding the lock across dispose no longer applies), so the disposing
+   * flag + observer-map removal alone are sufficient to keep the native free out of the lock.
    *
    * @param removeFromPluginMap removes the observer from the owning MethodCallHandlerImpl's
    *     {@code mPeerConnectionObservers} map; run under {@link #lock} so no attach can resolve a
@@ -111,18 +131,18 @@ public final class KaytenWebRtcCryptoBridge {
       if (state != null) {
         state.disposing = true;
       }
-      // Free the native PeerConnection (and its RtpSenders/Receivers) when one is present.
-      // A null PC here is a never-initialized / init-failed observer — PeerConnectionObserver
-      // .dispose() does NOT null the field, so an already-freed PC still reads non-null.
-      // Double-dispose is prevented one layer up by removing the observer from the plugin map
-      // (so a second String-path dispose finds no observer).
-      if (pco != null && pco.getPeerConnection() != null) {
-        pco.dispose();
-      }
       if (removeFromPluginMap != null) {
         removeFromPluginMap.run();
       }
       states.remove(peerConnectionId);
+    }
+    // Free the native PeerConnection (and its RtpSenders/Receivers) when one is present, OUTSIDE
+    // `lock` — see the Javadoc above for why. A null PC here is a never-initialized / init-failed
+    // observer — PeerConnectionObserver.dispose() does NOT null the field, so an already-freed PC
+    // still reads non-null. Double-dispose is prevented one layer up by removing the observer
+    // from the plugin map above (so a second String-path dispose finds no observer).
+    if (pco != null && pco.getPeerConnection() != null) {
+      pco.dispose();
     }
   }
 
