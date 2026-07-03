@@ -197,9 +197,19 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       }
       localTracks.clear();
     }
-    for (final PeerConnectionObserver connection : mPeerConnectionObservers.values()) {
+    // MoHSM-321/322/347/348: tear each PeerConnection down atomically under the
+    // Kayten bridge lock (native free + observer-map removal + PcState drop), the
+    // same window the connect-time path was hardened against. Iterate a snapshot of
+    // the ids so the per-entry mPeerConnectionObservers.remove inside
+    // disposePeerConnection cannot ConcurrentModification the live map.
+    for (final String id : new ArrayList<>(mPeerConnectionObservers.keySet())) {
+      final PeerConnectionObserver connection = mPeerConnectionObservers.get(id);
+      if (connection == null) {
+        continue;
+      }
       try {
-        peerConnectionDispose(connection);
+        KaytenWebRtcCryptoBridge.disposePeerConnection(
+            id, connection, () -> mPeerConnectionObservers.remove(id));
       } catch (Exception e) {
         Log.w(TAG, "dispose(): error disposing peer connection", e);
       }
@@ -2130,10 +2140,12 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   public void peerConnectionDispose(final String id) {
     PeerConnectionObserver pco = mPeerConnectionObservers.get(id);
     if (pco != null) {
-      if (peerConnectionDispose(pco)) {
-
-        mPeerConnectionObservers.remove(id);
-      }
+      // MoHSM-321/322/347/348: free the native PC and remove the observer from
+      // mPeerConnectionObservers atomically under the Kayten bridge lock, so a
+      // connect-time video attach can never resolve an observer whose native
+      // PeerConnection is being freed (setFrameEncryptor-on-freed-sender UAF).
+      KaytenWebRtcCryptoBridge.disposePeerConnection(
+          id, pco, () -> mPeerConnectionObservers.remove(id));
     } else {
       Log.d(TAG, "peerConnectionDispose() peerConnectionObserver is null");
     }

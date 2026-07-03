@@ -75,6 +75,51 @@ public final class KaytenWebRtcCryptoBridge {
     }
   }
 
+  /**
+   * Atomically tear down a PeerConnection: mark it closing (detach Kayten cryptors), free the
+   * native PeerConnection, remove the plugin's observer from its own map, and drop the PcState
+   * — ALL while holding {@link #lock}.
+   *
+   * <p>MoHSM-321/322/347/348 UAF fix. {@code attachVideoEncryptor}/{@code attachVideoDecryptor}
+   * also hold {@link #lock}, so a concurrent connect-time attach is now strictly serialized
+   * against this teardown: it either runs entirely BEFORE (resolving a live PeerConnection) or
+   * entirely AFTER (the observer is gone from the plugin map, so {@code observerFor} returns
+   * null and attach fails closed). The previous code freed the native PC and cleared the
+   * disposing flag OUTSIDE this critical section and removed the observer from the plugin map
+   * only afterward — leaving a window in which an attach re-created a fresh {@code
+   * disposing=false} PcState, resolved the still-mapped observer, and called
+   * {@code getRtpSenderById}/{@code setFrameEncryptor} on the already-freed native PeerConnection
+   * (dangling vtable → SIGSEGV in {@code nativeSetFrameEncryptor}).
+   *
+   * @param removeFromPluginMap removes the observer from the owning MethodCallHandlerImpl's
+   *     {@code mPeerConnectionObservers} map; run under {@link #lock} so no attach can resolve a
+   *     mid-teardown observer.
+   */
+  static void disposePeerConnection(
+      String peerConnectionId,
+      PeerConnectionObserver pco,
+      Runnable removeFromPluginMap) {
+    synchronized (lock) {
+      PcState state = states.get(peerConnectionId);
+      if (state != null) {
+        state.disposing = true;
+        detachAllLocked(peerConnectionId, state);
+      }
+      // Free the native PeerConnection (and its RtpSenders/Receivers) when one is present.
+      // A null PC here is a never-initialized / init-failed observer — PeerConnectionObserver
+      // .dispose() does NOT null the field, so an already-freed PC still reads non-null.
+      // Double-dispose is prevented one layer up by removing the observer from the plugin map
+      // (so a second String-path dispose finds no observer).
+      if (pco != null && pco.getPeerConnection() != null) {
+        pco.dispose();
+      }
+      if (removeFromPluginMap != null) {
+        removeFromPluginMap.run();
+      }
+      states.remove(peerConnectionId);
+    }
+  }
+
   public static boolean isBound() {
     synchronized (lock) {
       return !providers.isEmpty();
