@@ -483,6 +483,13 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
   @Override
   public void onAddTrack(RtpReceiver receiver, MediaStream[] mediaStreams) {
     Log.d(TAG, "onAddTrack");
+    if ("video".equals(receiver.track() != null ? receiver.track().kind() : null)) {
+      KaytenVideoCryptorProvider provider = KaytenWebRtcCryptoBridge.getCryptorProvider();
+      boolean attached = provider != null && provider.onVideoReceiverCreated(id, receiver);
+      if (provider != null && !attached) {
+        android.util.Log.e(TAG, "onVideoReceiverCreated attached no decryptor on " + id);
+      }
+    }
     // for plan-b
     for (MediaStream stream : mediaStreams) {
       String streamId = stream.getId();
@@ -1013,6 +1020,19 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
 
   public void addTrack(MediaStreamTrack track, List<String> streamIds, Result result) {
     RtpSender sender = peerConnection.addTrack(track, streamIds);
+    // MoHSM-321: attach the Kayten frame encryptor synchronously, on THIS freshly
+    // created sender, on the platform thread — before any SDP negotiation can free
+    // or replace it. Never re-resolve a sender by id later.
+    if ("video".equals(track.kind())) {
+      KaytenVideoCryptorProvider provider = KaytenWebRtcCryptoBridge.getCryptorProvider();
+      boolean attached = provider != null && provider.onVideoSenderCreated(id, sender);
+      if (provider != null && !attached) {
+        // Fail closed: no cryptor → do not emit plaintext video.
+        MediaStreamTrack t = sender.track();
+        if (t != null) t.setEnabled(false);
+        android.util.Log.e(TAG, "onVideoSenderCreated attached no cryptor; disabling track on " + id);
+      }
+    }
     result.success(rtpSenderToMap(sender));
   }
 
